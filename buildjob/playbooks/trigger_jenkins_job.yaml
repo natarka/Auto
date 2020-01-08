@@ -1,0 +1,16 @@
+---
+- hosts: localhost
+  vars:
+    jenkins_user: "admin"
+    jenkins_cred: "admin123"
+    #hostname: "10.50.52.75:8080" 
+    jenkins_host: "10.0.2.6:8080"
+    jenkins_protocol: "http"
+    jenkins_job: "test_script"
+    jenkins_job_token: " "
+
+  tasks:
+    - name: Trigger a jenkins jon
+#      gather_facts: false
+      include_role:
+        name: jenkins_job_build

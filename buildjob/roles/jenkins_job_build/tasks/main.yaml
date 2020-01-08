@@ -1,0 +1,155 @@
+# Generic role for running a jenkins job and checking that it completes successfully.
+# Note this uses json_query which means you need to install jmespath from pip
+
+# role parameters
+# mandatory parameters
+#     jenkins_host
+#     jenkins_job
+#     jenkins_job_token
+# Note: remember to set the job token up in the job configuration
+# in Build Triggers ->
+# Trigger builds remotely (e.g., from scripts)
+# Without this you'll get 403 'No valid crumb was included in the request'.
+# Wee http://www.inanzzz.com/index.php/post/jnrg/running-jenkins-build-via-command-line
+# for a simple description of setting up jenkins jobs so they can be called remotely.
+#
+#
+# optional parameters
+#     jenkins_protocol (default value: http)
+#     success_check_max_retries: (default value: 10)
+#     jenkins_user (no default)
+#     jenkins_cred (no default)
+
+
+
+- name: post to jenkins job queue to attempt to start a jenkins build job
+  block:
+
+    - name: call for crumb
+      uri:
+        force_basic_auth: yes
+        headers:
+          Content-Type: "application/json"
+        method: GET
+        password: "{{ jenkins_cred }}"
+        return_content: yes
+        status_code: 200
+        url: '{{jenkins_protocol}}://{{jenkins_host}}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,":",//crumb)'
+        user: "{{ jenkins_user }}"
+        validate_certs: false
+      register: jenkins_crumb_raw
+      ignore_errors: true
+
+    - name: debug jenkins request result
+      debug:
+        var: jenkins_crumb_raw
+
+    - name: set crumb
+      set_fact:
+        jenkins_crumb: "{{ jenkins_crumb_raw.content.split(':')[1] }}"
+      when: jenkins_crumb_raw.status == 200
+ 
+
+    - name: call the jenkins rest api endpoint for starting the jenkins job
+      uri:
+        force_basic_auth: yes
+        headers:
+          Content-Type: "application/json"
+          Content-Type: "application/x-www-form-urlencoded"
+          Jenkins-Crumb : "{{ jenkins_crumb | default('') }}"
+        method: POST
+        password: "{{ jenkins_cred }}"
+        return_content: yes
+        status_code: 201
+        #url: "{{jenkins_protocol}}://{{jenkins_host}}/job/{{ jenkins_job }}/buildWithParameters?&delay=0sec&TOKEN={{jenkins_job_token}}"
+        url: "{{jenkins_protocol}}://{{jenkins_host}}/job/{{ jenkins_job }}/build?&delay=0sec&TOKEN={{jenkins_job_token}}"
+        user: "{{ jenkins_user }}"
+        validate_certs: false
+      register: start_job_result
+     
+    # hopefully the job is queued at this point.
+    # Now poll the job queue to see if it has finished.
+
+    - name: debug jenkins request result
+      debug:
+        var: start_job_result
+        verbosity: 1
+  rescue:
+    - name: Fail because we could not queue a new build job in Jenkins successfully
+      fail:
+        msg: "Error, could not queue a new build for jenkins job [ {{ jenkins_job }} ] on [ {{jenkins_protocol}}://{{jenkins_host}} ].  Is jenkins up and reachable?  Is the job name correct?  Are the credentials correct and current?"
+
+# Now query the job queue and poll until it has started the build, or timed out
+- name: query jenkins job queue to see if it has been able to start a build
+  block:
+    - name: poll jenkins JOB QUEUE every 3 seconds for configured number of attempts to get the number from the job queue
+      uri:
+        force_basic_auth: yes
+        headers:
+          Content-Type: "application/json"
+        method: GET
+        password: "{{ jenkins_cred }}"
+        return_content: yes
+        timeout: 5
+        #url: "{{start_job_result.location}}lastBuild/api/json"
+        url: "{{jenkins_protocol}}://{{jenkins_host}}/job/{{ jenkins_job }}/lastBuild/api/json"
+        user: "{{ jenkins_user }}"
+        validate_certs: false
+      register: poll_result
+      until: poll_result|json_query('json.number')|default(0)|int > 0
+      retries: 10
+      delay: 3
+
+  rescue:
+    - name: Fail because we could not query the jenkins job queue successfully
+      fail:
+        msg: "Error, could not query the jenkins job queue at [ {{start_job_result.location}}/api/json ].  Is jenkins up?  Are the credentials correct and current?"
+
+- name: check for jenkins job success
+  block:
+    - name: show the build job url detected above
+      debug:
+        msg: "Build job is at [ {{jenkins_protocol}}://{{jenkins_host}}/job/{{ jenkins_job }}/{{poll_result.json.number}}/api/json ]"
+
+    - name: now poll jenkins JOB every 3 seconds for configured number of attempts to check if the job was actually successful
+      uri:
+        force_basic_auth: yes
+        headers:
+          Content-Type: "application/json"
+        method: GET
+        password: "{{ jenkins_cred }}"
+        return_content: yes
+        timeout: 5
+        url: "{{jenkins_protocol}}://{{jenkins_host}}/job/{{ jenkins_job }}/{{poll_result.json.number}}/api/json"
+        user: "{{ jenkins_user }}"
+        validate_certs: false
+      register: build_job_result
+      until: build_job_result.json is defined and build_job_result.json.building is defined and build_job_result.json.building|bool == false # and build_job_result|json_query('json.result') != 'null'
+      retries: 10
+      delay: 3
+
+    - name: build
+      debug:
+        var: build_job_result.json.building
+
+    - name: show the build job url detected above
+      debug:
+        msg: "Build job [ {{jenkins_protocol}}://{{jenkins_host}}/job/{{ jenkins_job }}/{{poll_result.json.number}}/api/json ]  reported {{build_job_result.json.result}}"
+
+  rescue:
+
+    - name:
+      fail:
+        msg: "Build job [ {{jenkins_protocol}}://{{jenkins_host}}/job/{{ jenkins_job }}/{{poll_result.json.number}}/api/json ]" 
+
+
+- name: ensure role parameters supplied
+  fail:
+    msg: "jenkins-job role is failed with status {{build_job_result.json.result}}"
+  when:
+      - build_job_result.json.result not in ('SUCCESS')
+
+- name: Set jenkins job url
+  set_fact:
+    jenkins_build: "{{ jenkins_protocol}}://{{jenkins_host}}/job/{{ jenkins_job }}/{{poll_result.json.number }}"
+ 

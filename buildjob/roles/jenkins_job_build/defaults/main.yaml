@@ -1,0 +1,5 @@
+---
+success_check_max_retries: 40
+jenkins_protocol: https
+poll_delay_seconds: 5
+
